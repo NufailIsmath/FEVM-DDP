@@ -29,13 +29,13 @@ async function callRpc(method, params) {
 
 const deployer = new ethers.Wallet(DEPLOYER_PRIVATE_KEY)
 
-module.exports = async ({ deployments }) => {
+module.exports = async({ deployments }) => {
     const { deploy } = deployments
 
     const priorityFee = await callRpc("eth_maxPriorityFeePerGas")
-    
+
     // Wraps Hardhat's deploy, logging errors to console.
-    const deployLogError = async (title, obj) => {
+    const deployLogError = async(title, obj) => {
         let ret;
         try {
             ret = await deploy(title, obj);
@@ -76,3 +76,21 @@ module.exports = async ({ deployments }) => {
     })
 }
 
+/* module.exports = async ({ deployments }) => {
+    const { deploy } = deployments;
+
+    // type ProxyOptionsBase = {
+    //     owner: deployer.address; // this set the owner of the proxy. further upgrade will need to be executed from that owner
+    //     viaAdminContract?: // allow to specify a contract that act as a middle man to perform upgrades. Useful and Recommended for Transparent Proxies
+    //     | string
+    //     | {
+    //         name: string;
+    //         artifact?: string | ArtifactData;
+    //     };
+    // };
+
+    await deploy("DDP", {
+        from: deployer.address,
+        proxy: true
+    })
+} */
