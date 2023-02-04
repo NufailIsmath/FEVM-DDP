@@ -62,6 +62,7 @@ contract DDP is Initializable, PausableUpgradeable, AccessControlUpgradeable, UU
     mapping(address => User) public userProfiles;
     mapping(address => mapping(bytes32 => bool)) _taskContributors;
     mapping(address => mapping(bytes32 => uint256)) _stakedPerTask;
+    mapping(address => mapping(bytes32 => bool)) _blacklisted;
 
     event StakedForTaskCreation(
         bytes32 projectId,
@@ -81,8 +82,9 @@ contract DDP is Initializable, PausableUpgradeable, AccessControlUpgradeable, UU
     event TaskBackToProgress(bytes32 taskId, address taskOwner, uint256 status);
     event TaskReadyToTest(bytes32 taskId, address taskOwner, uint256 status);
     event TaskInTesting(bytes32 taskId, address taskOwner, uint256 status);
-
-    //event TaskInReview(bytes32 taskId, address taskOwner, uint256 status);
+    event TaskTestCompleted(bytes32 taskId, address taskOwner, uint256 status);
+    event TaskTestFailed(bytes32 taskId, address taskOwner, uint256 status);
+    event TaskCompleted(bytes32 taskId, address taskOwner, uint256 status);
 
     //TODO: Take percentage as 1000 decimal place
 
@@ -254,6 +256,7 @@ contract DDP is Initializable, PausableUpgradeable, AccessControlUpgradeable, UU
             userRole == DEV_ROLE || userRole == REVIEWER_ROLE || userRole == TESTER_ROLE,
             "DDP: Invalid Role"
         );
+        require(!_blacklisted[msg.sender][taskId], "DDP: User is being blacklisted");
         require(!_taskContributors[msg.sender][taskId], "DDP: Already a contributor");
         require(
             userProfiles[msg.sender].stakedAmount >=
@@ -285,18 +288,6 @@ contract DDP is Initializable, PausableUpgradeable, AccessControlUpgradeable, UU
         return _tasksOfACreators[owner][taskId].taskId;
     }
 
-    /* TODO: taskStatusUpdate
-    * Who is updating the status
-    *
-    
-    */
-
-    /* When completing task reward calculation
-
-    * Reward 40/2 for QA and Reviewer
-    * Reviewer/reviewerCount
-    */
-
     function taskStatusUpdate(
         bytes32 taskId,
         address taskOwner,
@@ -304,8 +295,8 @@ contract DDP is Initializable, PausableUpgradeable, AccessControlUpgradeable, UU
         uint256 to
     ) public {
         require(_taskContributors[msg.sender][taskId], "DDP: Only contributors allowed");
-
-        //uint256 userRole = _getContributorRole(taskId, taskOwner, msg.sender);
+        require(from <= 9, "DDP: Invalid From");
+        require(to <= 9, "DDP: Invalid To");
 
         if (from == 0 && to == 1) {
             // in progress
@@ -315,11 +306,11 @@ contract DDP is Initializable, PausableUpgradeable, AccessControlUpgradeable, UU
             _taskToReview(taskId, taskOwner, from, to);
         } else if (from == 2 && to == 3) {
             // reviewing
-            _tastToReviewing(taskId, taskOwner, from, to);
-        } else if (from == 3 && to == 11) {
+            _taskToReviewing(taskId, taskOwner, from, to);
+        } else if (from == 3 && to == 8) {
             // updated review failed - review failed
             _taskReviewFailed(taskId, taskOwner, from, to);
-        } else if (from == 11 && to == 1) {
+        } else if (from == 8 && to == 1) {
             // back to in progress - review failed
             _taskBackToProgress(taskId, taskOwner, from, to);
         } else if (from == 3 && to == 4) {
@@ -328,12 +319,50 @@ contract DDP is Initializable, PausableUpgradeable, AccessControlUpgradeable, UU
         } else if (from == 4 && to == 5) {
             // testing
             _taskTesting(taskId, taskOwner, from, to);
-        } else if (from == 5 && to == 1) {
+        } else if (from == 5 && to == 9) {
+            // back to in progress - test failed
+            _taskTestFailed(taskId, taskOwner, from, to);
+        } else if (from == 9 && to == 1) {
             // back to in progress - test failed
             _taskBackToProgress(taskId, taskOwner, from, to);
-        } else if (from == 6 && to == 7) {
+        } else if (from == 5 && to == 6) {
             // test completed
+            _taskTestCompleted(taskId, taskOwner, from, to);
             //_taskCompleted(taskId, taskOwner);
+        } else if (from == 6 && to == 7) {
+            _taskCompleted(taskId, taskOwner, from, to);
+        } else {
+            // Restricted to task owner
+            _switchTaskStatus(taskId, taskOwner, from, to);
+        }
+    }
+
+    function _switchTaskStatus(
+        bytes32 taskId,
+        address taskOwner,
+        uint256 from,
+        uint256 to
+    ) private {
+        require(
+            _tasksOfACreators[taskOwner][taskId].owner == msg.sender,
+            "DDP: Restricted to task owner"
+        );
+        if (to == 1) {
+            _taskToInProgress(taskId, taskOwner, from, to);
+        } else if (to == 2) {
+            _taskToReview(taskId, taskOwner, from, to);
+        } else if (to == 3) {
+            _taskToReviewing(taskId, taskOwner, from, to);
+        } else if (to == 4) {
+            _taskReadyToTest(taskId, taskOwner, from, to);
+        } else if (to == 5) {
+            _taskTesting(taskId, taskOwner, from, to);
+        } else if (to == 6) {
+            _taskTestCompleted(taskId, taskOwner, from, to);
+        } else if (to == 7) {
+            _taskCompleted(taskId, taskOwner, from, to);
+        } else {
+            revert("DDP: Invlaid Input");
         }
     }
 
@@ -373,7 +402,7 @@ contract DDP is Initializable, PausableUpgradeable, AccessControlUpgradeable, UU
         emit TaskToBeReviewed(taskId, taskOwner, to);
     }
 
-    function _tastToReviewing(
+    function _taskToReviewing(
         bytes32 taskId,
         address taskOwner,
         uint256 from,
@@ -407,6 +436,27 @@ contract DDP is Initializable, PausableUpgradeable, AccessControlUpgradeable, UU
         task.taskStatus = to;
         task.redoCount++;
 
+        address devAddress = task.dev.userAddress;
+        if (task.redoCount == 1) {
+            delete _stakedPerTask[task.dev.userAddress][taskId];
+            userProfiles[task.dev.userAddress].stakedAmount = userProfiles[devAddress]
+                .stakedAmount
+                .sub(task.contributorStakeAmount);
+            //TODO: transfer the amount to a staking pool contract
+
+            //emit DevTaskStakeRemoved(taskId, task.dev.userAddress, task.contributorStakeAmount);
+        } else {
+            //TODO: Kick out Dev change status to TODO
+            // kickout dev
+            User memory emptyUser = userProfiles[address(0)];
+            _blacklisted[devAddress][taskId] = true;
+            task.dev = emptyUser;
+
+            task.taskStatus = 0;
+
+            //emit DevKickedOut(address devAddress, taskId);
+        }
+
         emit TaskReviewFailed(taskId, taskOwner, to);
     }
 
@@ -423,11 +473,6 @@ contract DDP is Initializable, PausableUpgradeable, AccessControlUpgradeable, UU
         );
         Task storage task = _tasksOfACreators[taskOwner][taskId];
         require(task.taskStatus == from, "DDP: Task status invalid");
-        if (task.redoCount == 1) {
-            delete _stakedPerTask[task.dev.userAddress][taskId];
-        } else {
-            // kickout dev
-        }
 
         task.taskStatus = to;
 
@@ -443,7 +488,7 @@ contract DDP is Initializable, PausableUpgradeable, AccessControlUpgradeable, UU
         require(
             _getContributorRole(taskId, taskOwner, msg.sender) == 2 ||
                 _getContributorRole(taskId, taskOwner, msg.sender) == 0,
-            "DDP: Restricted to dev and task owner"
+            "DDP: Restricted to reviewer and task owner"
         );
         Task storage task = _tasksOfACreators[taskOwner][taskId];
         require(task.taskStatus == from, "DDP: Task status invalid");
@@ -462,7 +507,7 @@ contract DDP is Initializable, PausableUpgradeable, AccessControlUpgradeable, UU
         require(
             _getContributorRole(taskId, taskOwner, msg.sender) == 3 ||
                 _getContributorRole(taskId, taskOwner, msg.sender) == 0,
-            "DDP: Restricted to dev and task owner"
+            "DDP: Restricted to tester and task owner"
         );
         Task storage task = _tasksOfACreators[taskOwner][taskId];
         require(task.taskStatus == from, "DDP: Task status invalid");
@@ -472,7 +517,141 @@ contract DDP is Initializable, PausableUpgradeable, AccessControlUpgradeable, UU
         emit TaskInTesting(taskId, taskOwner, to);
     }
 
+    // TODO: Task TEST FAILED
+    function _taskTestFailed(
+        bytes32 taskId,
+        address taskOwner,
+        uint256 from,
+        uint256 to
+    ) private {
+        require(
+            _getContributorRole(taskId, taskOwner, msg.sender) == 3 ||
+                _getContributorRole(taskId, taskOwner, msg.sender) == 0,
+            "DDP: Restricted to tester and task owner"
+        );
+        Task storage task = _tasksOfACreators[taskOwner][taskId];
+        require(task.taskStatus == from, "DDP: Task status invalid");
+
+        task.taskStatus = to;
+
+        emit TaskTestFailed(taskId, taskOwner, to);
+    }
+
+    function _taskTestCompleted(
+        bytes32 taskId,
+        address taskOwner,
+        uint256 from,
+        uint256 to
+    ) private {
+        require(
+            _getContributorRole(taskId, taskOwner, msg.sender) == 3 ||
+                _getContributorRole(taskId, taskOwner, msg.sender) == 0,
+            "DDP: Restricted to tester and task owner"
+        );
+        Task storage task = _tasksOfACreators[taskOwner][taskId];
+        require(task.taskStatus == from, "DDP: Task status invalid");
+
+        task.taskStatus = to;
+
+        emit TaskTestCompleted(taskId, taskOwner, to);
+    }
+
+    /* TODO: taskStatusUpdate
+    * Who is updating the status
+    *
+    
+    */
+
+    /* When completing task reward calculation
+
+    * Reward 40/2 for QA and Reviewer
+    * Reviewer/reviewerCount
+    */
+
     // TODO: _taskCompleted
+    function _taskCompleted(
+        bytes32 taskId,
+        address taskOwner,
+        uint256 from,
+        uint256 to
+    ) private {
+        require(
+            _getContributorRole(taskId, taskOwner, msg.sender) == 0,
+            "DDP: Restricted task owner"
+        );
+        Task storage task = _tasksOfACreators[taskOwner][taskId];
+        require(task.taskStatus == from, "DDP: Task status invalid");
+
+        (uint256 devReward, uint256 reviewerReward, uint256 testerReward) = _getRewardCalculation(
+            taskId,
+            taskOwner
+        );
+
+        // reward the dev
+        _rewardDev(task, devReward);
+
+        // reward the reviewers
+        _rewardReviewers(task, reviewerReward);
+
+        // reward the testers
+        _rewardTesters(task, testerReward);
+
+        task.taskStatus = to;
+
+        emit TaskCompleted(taskId, taskOwner, to);
+    }
+
+    function _rewardDev(Task storage task, uint256 amount) private {
+        require(!task.dev.isRewarded, "DDP: Dev is already being rewarded");
+        task.dev.isRewarded = true;
+        task.stakedCurrency.transfer(task.dev.userAddress, amount);
+
+        // emit TrasnferDevReward(task.taskId, task.dev.userAddress, amount);
+    }
+
+    function _rewardReviewers(Task storage task, uint256 amount) private {
+        for (uint8 i = 0; i < task.reviewers.length; i++) {
+            require(!task.reviewers[i].isRewarded, "DDP: Reviewer is already being rewarded");
+            task.reviewers[i].isRewarded = true;
+            task.stakedCurrency.transfer(task.reviewers[i].userAddress, amount);
+
+            //emit TransferReviewerReward(task.taskId, task.reviewers[i].userAddress, amount);
+        }
+    }
+
+    function _rewardTesters(Task storage task, uint256 amount) private {
+        for (uint8 i = 0; i < task.testers.length; i++) {
+            require(!task.testers[i].isRewarded, "DDP: Tester is already being rewarded");
+            task.testers[i].isRewarded = true;
+            task.stakedCurrency.transfer(task.testers[i].userAddress, amount);
+
+            //emit TransferTesterReward(task.taskId, task.testers[i].userAddress, amount);
+        }
+    }
+
+    function _getRewardCalculation(bytes32 taskId, address taskOwner)
+        public
+        view
+        returns (
+            uint256,
+            uint256,
+            uint256
+        )
+    {
+        Task memory task = _tasksOfACreators[taskOwner][taskId];
+        uint256 devRewardAmount = task.stakedAmount.mul(task.reward.devRewardPerc).div(100 * 10**3);
+        uint256 totalReviewerRewardAmount = task
+            .stakedAmount
+            .mul(task.reward.reviewerRewardPerc)
+            .div(100 * 10**3);
+        uint256 reviewerRewardAmount = totalReviewerRewardAmount.div(task.reviewers.length);
+        uint256 totalTesterRewardAmount = task.stakedAmount.mul(task.reward.testerRewardPerc).div(
+            100 * 10**3
+        );
+        uint256 testerRewardAmount = totalTesterRewardAmount.div(task.testers.length);
+
+        return (devRewardAmount, reviewerRewardAmount, testerRewardAmount);
+    }
 
     function _getContributorRole(
         bytes32 taskId,
@@ -503,4 +682,6 @@ contract DDP is Initializable, PausableUpgradeable, AccessControlUpgradeable, UU
             return 3;
         }
     }
+
+    //TODO: UpdateTaskDetails (IPFS URI)
 }
